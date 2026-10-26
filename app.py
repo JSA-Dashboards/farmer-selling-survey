@@ -84,6 +84,16 @@ html, body, p, span, div, label, button, td, th {{ font-family:'Source Sans 3','
     border-radius:10px; padding:14px 16px; }}
 .cy-row {{ color:{DM_TEXT}; font-size:1.05rem; padding:3px 0; }}
 .cy-row.cy-new {{ font-weight:700; font-size:1.2rem; }}
+.sum-wrap {{ background:{DM_SURFACE}; border:1px solid {DM_BORDER}; border-top:3px solid {JSA_GREEN};
+    border-radius:10px; padding:6px 12px; overflow-x:auto; }}
+table.sum {{ width:100%; border-collapse:collapse; font-size:0.95rem; }}
+table.sum th {{ color:{DM_MUTED}; font-size:0.68rem; text-transform:uppercase; letter-spacing:0.09em;
+    text-align:left; padding:10px 8px; border-bottom:1px solid {DM_BORDER}; font-weight:600; }}
+table.sum td {{ padding:11px 8px; border-bottom:1px solid {DM_BORDER}; color:{DM_TEXT}; }}
+table.sum tr:last-child td {{ border-bottom:none; }}
+table.sum .num {{ text-align:right; white-space:nowrap; }}
+table.sum td.big {{ font-size:1.25rem; font-weight:700; }}
+table.sum td.up {{ color:{COL_POS}; font-weight:600; }} table.sum td.down {{ color:{COL_NEG}; font-weight:600; }}
 hr {{ border-color:{DM_BORDER}; }}
 {table_wm_css}
 #MainMenu, footer {{ visibility:hidden; }}
@@ -156,7 +166,66 @@ order = MONTHS[sm - 1:] + MONTHS[:sm - 1]
 close = order[0] + " close"
 mo = monthly[monthly.commodity == commodity]
 
-tab_snap, tab_month, tab_data, tab_admin = st.tabs(["Snapshot", "Monthly view", "Data", "Admin"])
+tab_sum, tab_snap, tab_month, tab_data, tab_admin = st.tabs(["Summary", "Snapshot", "Monthly view", "Data", "Admin"])
+
+
+def snap_stats(com):
+    """Latest current-crop % for one commodity vs last year / prior-year average, plus new-crop forward sales."""
+    m = monthly[monthly.commodity == com]
+    cur = m[m.kind == "current"]
+    if cur.empty:
+        return None
+    s = START[com]
+    ords = MONTHS[s - 1:] + MONTHS[:s - 1]
+    ords = ords + [ords[0] + " close"]
+    newest = max(cur.crop_year)
+    mon = max(cur[cur.crop_year == newest].month, key=ords.index)
+    now = cur[(cur.crop_year == newest) & (cur.month == mon)].pct.iloc[0]
+    others = cur[(cur.month == mon) & (cur.crop_year != newest)].sort_values("crop_year").pct
+    nw = m[m.kind == "new"]
+    new_pct = None
+    if len(nw):
+        ny = max(nw.crop_year)
+        rows = nw[nw.crop_year == ny]
+        new_pct = (ny, max(rows.month, key=ords.index), rows[rows.month == max(rows.month, key=ords.index)].pct.iloc[0])
+    return dict(com=com, crop=newest, month=mon, now=now,
+                ly=others.iloc[-1] if len(others) else None, avg=others.mean() if len(others) else None, new=new_pct)
+
+
+def delta_cell(v):
+    if v is None:
+        return '<td class="num">&ndash;</td>'
+    cls = "up" if v > 0 else "down" if v < 0 else ""
+    return f'<td class="num {cls}">{v:+.0f} pts</td>'
+
+
+@st.fragment
+def summary():
+    rows = [r for r in (snap_stats(c) for c in COMMODITIES) if r]
+    def pct(v):
+        return "&ndash;" if v is None else "%.0f%%" % v
+
+    def gap(a, b):
+        return None if b is None else a - b
+
+    body = ""
+    for r in rows:
+        new = r["new"]
+        body += ('<tr><td><b>%s</b></td><td>%s</td><td>%s</td><td class="num big">%s</td>'
+                 '<td class="num">%s</td>%s<td class="num">%s</td>%s<td>%s</td><td class="num">%s</td></tr>'
+                 % (r["com"], r["crop"], r["month"], pct(r["now"]),
+                    pct(r["ly"]), delta_cell(gap(r["now"], r["ly"])),
+                    pct(r["avg"]), delta_cell(gap(r["now"], r["avg"])),
+                    "&ndash;" if new is None else new[0], pct(None if new is None else new[2])))
+    sec("Current-crop sales, all commodities")
+    st.markdown(
+        '<div class="sum-wrap"><table class="sum"><thead><tr><th>Commodity</th><th>Crop year</th><th>As of</th>'
+        '<th class="num">% sold</th><th class="num">Last year</th><th class="num">vs LY</th>'
+        '<th class="num">Avg prior yrs</th><th class="num">vs avg</th><th>New crop</th>'
+        f'<th class="num">New-crop % sold</th></tr></thead><tbody>{body}</tbody></table></div>',
+        unsafe_allow_html=True)
+    st.caption("% sold is the share of the crop reported sold as of the latest survey month for the newest crop year. "
+               "Last year and the prior-year average are for the same month.")
 
 
 @st.fragment
@@ -228,6 +297,8 @@ def data_view():
     st.download_button("Download survey points (CSV)", sv.to_csv(index=False), f"{commodity}_survey.csv")
 
 
+with tab_sum:
+    summary()
 with tab_snap:
     snapshot()
 with tab_month:
