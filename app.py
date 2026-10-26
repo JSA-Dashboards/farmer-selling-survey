@@ -80,6 +80,10 @@ html, body, p, span, div, label, button, td, th {{ font-family:'Source Sans 3','
 .asof {{ background:{DM_SURFACE}; border:1px solid {DM_BORDER}; border-radius:8px; padding:10px 16px;
     color:{DM_MUTED}; font-size:0.82rem; margin-bottom:12px; }}
 .asof b {{ color:{DM_TEXT}; }}
+.cy-card {{ background:{DM_SURFACE}; border:1px solid {DM_BORDER}; border-top:3px solid {JSA_GREEN};
+    border-radius:10px; padding:14px 16px; }}
+.cy-row {{ color:{DM_TEXT}; font-size:1.05rem; padding:3px 0; }}
+.cy-row.cy-new {{ font-weight:700; font-size:1.2rem; }}
 hr {{ border-color:{DM_BORDER}; }}
 {table_wm_css}
 #MainMenu, footer {{ visibility:hidden; }}
@@ -112,15 +116,19 @@ def year_color(cy, years):
     return YEAR_COLORS[-(n - years.index(cy))] if n <= len(YEAR_COLORS) else YEAR_COLORS[-1]
 
 
-def style_fig(fig, height=360):
+def style_fig(fig, height=400, title=None):
     wm = watermark_uri()
     if wm:
         fig.add_layout_image(dict(source=wm, xref="paper", yref="paper", x=0.5, y=0.5, sizex=0.5, sizey=0.5,
                                   xanchor="center", yanchor="middle", sizing="contain",
                                   opacity=WATERMARK_OPACITY, layer="below"))
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor=DM_SURFACE,
+    if title:
+        fig.update_layout(title=dict(text=title, x=0.5, xanchor="center", y=0.97,
+                                     font=dict(size=22, color=DM_TEXT, family="EB Garamond, Georgia, serif")))
+    fig.update_layout(height=height, margin=dict(l=10, r=10, t=90 if title else 10, b=10), paper_bgcolor=DM_SURFACE,
                       plot_bgcolor=DM_SURFACE, hovermode="x unified",
-                      legend=dict(orientation="h", y=1.12, x=0, font=dict(size=11, color=DM_MUTED)),
+                      legend=dict(orientation="h", y=1.06 if title else 1.12, x=0.5 if title else 0,
+                                  xanchor="center" if title else "left", font=dict(size=12, color=DM_MUTED)),
                       xaxis=dict(**AXIS), yaxis=dict(**AXIS, title="% sold", range=[0, 100], ticksuffix="%"))
     return fig
 
@@ -194,8 +202,19 @@ def monthly_view():
             fig.add_scatter(x=d.month, y=d.pct, name=cy, mode="lines+markers", marker=dict(size=5),
                             line=dict(color=year_color(cy, ks), width=3.5 if cy == ks[-1] else 2.2))
         fig.update_xaxes(categoryorder="array", categoryarray=ord_k)
-        st.plotly_chart(style_fig(fig), width="stretch", theme=None)
-        piv = k.pivot(index="month", columns="crop_year", values="pct").reindex(ord_k).dropna(how="all")
+        kind_lbl = "Current crop" if kind == "current" else "New crop"
+        style_fig(fig, title=f"Farmer Selling % - {commodity} ({kind_lbl})")
+        # side card: every crop year's % sold at the latest month reported for the newest crop year
+        latest = k[k.crop_year == ks[-1]].month.map(ord_k.index).max()
+        mon = ord_k[latest]
+        vals = k[k.month == mon].set_index("crop_year").pct
+        card = "".join(f'<div class="cy-row{" cy-new" if cy == ks[-1] else ""}">{cy} {vals[cy]:.0f}%</div>'
+                       for cy in reversed(ks) if cy in vals.index)
+        c_chart, c_card = st.columns([5, 1])
+        c_chart.plotly_chart(fig, width="stretch", theme=None)
+        c_card.markdown(f'<div class="cy-card"><div class="tile-label">{mon} % sold</div>{card}</div>',
+                        unsafe_allow_html=True)
+        piv =k.pivot(index="month", columns="crop_year", values="pct").reindex(ord_k).dropna(how="all")
         show_table(piv.map(lambda v: None if pd.isna(v) else f"{v:.0f}%"), f"m_{kind}")
 
 
