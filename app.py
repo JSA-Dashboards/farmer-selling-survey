@@ -166,7 +166,7 @@ order = MONTHS[sm - 1:] + MONTHS[:sm - 1]
 close = order[0] + " close"
 mo = monthly[monthly.commodity == commodity]
 
-tab_sum, tab_snap, tab_month, tab_data, tab_admin = st.tabs(["Summary", "Snapshot", "Monthly view", "Data", "Admin"])
+tab_sum, tab_month, tab_data, tab_admin = st.tabs(["Summary", "Monthly view", "Data", "Admin"])
 
 
 def snap_stats(com):
@@ -228,8 +228,7 @@ def summary():
                "Last year and the prior-year average are for the same month.")
 
 
-@st.fragment
-def snapshot():
+def kpi_tiles():
     cur = mo[mo.kind == "current"]
     newest = max(cur.crop_year)
     ord_s = order + [close]
@@ -253,11 +252,11 @@ def snapshot():
         ny_m = max(rows.month, key=ord_s.index)
         cols[3].markdown(tile(f"{ny} new crop", f"{rows[rows.month == ny_m].pct.iloc[0]:.0f}%",
                               f"forward sales, {ny_m}"), unsafe_allow_html=True)
-    st.caption(f"Latest dated survey point in the workbook's All Data sheet: {surveys.date.max():%b %d, %Y}.")
 
 
 @st.fragment
 def monthly_view():
+    kpi_tiles()
     for kind, lbl in (("current", "Current-crop sales"), ("new", "New-crop forward sales")):
         k = mo[mo.kind == kind]
         if k.empty:
@@ -299,8 +298,6 @@ def data_view():
 
 with tab_sum:
     summary()
-with tab_snap:
-    snapshot()
 with tab_month:
     monthly_view()
 with tab_data:
