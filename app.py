@@ -125,11 +125,13 @@ def style_fig(fig, height=400, title=None):
     if title:
         fig.update_layout(title=dict(text=title, x=0.5, xanchor="center", y=0.97,
                                      font=dict(size=22, color=DM_TEXT, family="EB Garamond, Georgia, serif")))
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=90 if title else 10, b=10), paper_bgcolor=DM_SURFACE,
+    fig.update_layout(height=height, margin=dict(l=60, r=20, t=90 if title else 10, b=50), paper_bgcolor=DM_SURFACE,
                       plot_bgcolor=DM_SURFACE, hovermode="x unified",
                       legend=dict(orientation="h", y=1.06 if title else 1.12, x=0.5 if title else 0,
                                   xanchor="center" if title else "left", font=dict(size=12, color=DM_MUTED)),
-                      xaxis=dict(**AXIS), yaxis=dict(**AXIS, title="% sold", range=[0, 100], ticksuffix="%"))
+                      xaxis={**AXIS, "automargin": True, "tickfont": dict(color=DM_TEXT, size=13)},
+                      yaxis={**AXIS, "automargin": True, "title": "% sold", "range": [0, 100], "ticksuffix": "%",
+                             "tickfont": dict(color=DM_TEXT, size=13)})
     return fig
 
 
