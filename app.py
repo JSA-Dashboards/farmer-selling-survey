@@ -156,6 +156,116 @@ def load_upload(data: bytes):
     return load_workbook_tables(io.BytesIO(data))
 
 
+def crop_years(com, now):
+    """(current, new) crop-year labels for a commodity as of `now`, from its marketing-year start month."""
+    y = now.year if now.month >= START[com] else now.year - 1
+    fmt = lambda a: "%02d/%02d" % (a % 100, (a + 1) % 100)
+    return fmt(y), fmt(y + 1)
+
+
+def survey_page():
+    """Client-facing monthly survey (?survey=1): access code, then % sold per commodity; shows no dashboard data."""
+    st.markdown("<style>[data-testid='stSidebar'], [data-testid='stSidebarCollapsedControl'] {display:none}</style>",
+                unsafe_allow_html=True)
+    sec("Monthly farmer selling survey")
+    if not db.configured():
+        st.error("The survey is not available right now. Please try again later.")
+        return
+    ss = st.session_state
+    if "svy_client" not in ss:
+        st.write("Enter the access code we sent you.")
+        code = st.text_input("Access code", key="svy_code", max_chars=16)
+        if st.button("Continue", type="primary"):
+            if ss.get("svy_tries", 0) >= 5:
+                st.error("Too many attempts. Please contact us for a new code.")
+                return
+            hit = db.client_for_code(code)
+            if hit:
+                ss["svy_client"] = (hit[0], hit[1])
+                st.rerun()
+            ss["svy_tries"] = ss.get("svy_tries", 0) + 1
+            st.error("That code was not recognised.")
+        return
+    client_id, name = ss["svy_client"]
+    now = pd.Timestamp.now(tz="America/Chicago")
+    month_key = now.strftime("%Y-%m")
+    st.write(f"Hello, **{name}**. How much of your crop had you sold as of today ({MONTHS[now.month - 1]} {now.year})? "
+             "Enter a percent from 0 to 100, and leave a box empty for crops you do not grow.")
+    prev = {(r.commodity, r.kind): r.pct for r in db.load_client_responses(client_id, month_key).itertuples()}
+    entries = []
+    with st.form("svy_form"):
+        for com in COMMODITIES:
+            st.markdown(f"**{com}**")
+            cols = st.columns(2)
+            cur, new = crop_years(com, now)
+            for col, knd, lbl, cy in ((cols[0], "current", "Current crop", cur), (cols[1], "new", "New crop", new)):
+                v = col.number_input(f"{lbl} ({cy}), % sold", min_value=0.0, max_value=100.0, value=prev.get((com, knd)),
+                                     step=1.0, placeholder="not reported", key=f"svy_{com}_{knd}")
+                entries.append((com, knd, cy, v))
+        sent = st.form_submit_button("Submit", type="primary")
+    if sent:
+        answered = [e for e in entries if e[3] is not None]
+        if not answered:
+            st.warning("Please answer at least one box.")
+        else:
+            db.save_responses(client_id, month_key,
+                              pd.DataFrame(answered, columns=["commodity", "kind", "crop_year", "pct"]))
+            st.success("Thank you! Your answers are saved. You can come back this month to change them.")
+
+
+def client_survey_admin():
+    """Admin: responses by month, the average roll-up (publish into the dashboard data), and client access codes."""
+    sec("Client survey")
+    if not db.configured():
+        st.info("The client survey needs the Snowflake connection.")
+        return
+    now = pd.Timestamp.now(tz="America/Chicago")
+    keys = [(now - pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(12)]
+    mk = st.selectbox("Survey month", keys, key="svy_admin_month")
+    try:
+        resp = db.load_responses(mk)
+        clients = db.list_clients()
+    except Exception:
+        st.warning("Survey tables not found. Run sql/client_survey.sql in Snowflake first.")
+        return
+    n_resp = resp.name.nunique() if len(resp) else 0
+    st.caption(f"{n_resp} of {int(clients.active.sum()) if len(clients) else 0} active clients have responded for {mk}.")
+    if len(resp):
+        roll = resp.groupby(["commodity", "kind", "crop_year"], as_index=False).agg(pct=("pct", "mean"), n=("pct", "size"))
+        roll["pct"] = roll.pct.round(0)
+        st.markdown("**Average of responses** (what gets published)")
+        st.dataframe(roll.rename(columns={"pct": "avg % sold", "n": "responses"}), hide_index=True, width="stretch")
+        if st.button("Publish averages to monthly data", icon=":material/publish:", key="svy_publish"):
+            out = roll.assign(month=MONTHS[int(mk[5:]) - 1])[["commodity", "kind", "crop_year", "month", "pct"]]
+            db.save_monthly(out)
+            st.cache_data.clear()
+            st.toast(f"Published {len(out)} value(s) for {MONTHS[int(mk[5:]) - 1]}.", icon=":material/check:")
+        with st.expander("Individual responses"):
+            st.dataframe(resp, hide_index=True, width="stretch")
+    st.markdown("**Client access codes**")
+    st.caption("Send each client the survey link (this app's address followed by `?survey=1`) and their code.")
+    with st.form("svy_new_client", clear_on_submit=True):
+        new_name = st.text_input("New client name")
+        if st.form_submit_button("Create access code") and new_name.strip():
+            st.session_state["svy_new_code"] = (new_name.strip(), db.add_client(new_name))
+            st.rerun()
+    if "svy_new_code" in st.session_state:
+        nm, cd = st.session_state.pop("svy_new_code")
+        st.success(f"Access code for {nm} (shown once, copy it now):")
+        st.code(cd)
+    if len(clients):
+        st.dataframe(clients.drop(columns=["client_id"]), hide_index=True, width="stretch")
+        who = st.selectbox("Turn a client on or off", clients.name, key="svy_toggle_client")
+        row = clients[clients.name == who].iloc[0]
+        if st.button("Turn off" if row.active else "Turn on", key="svy_toggle"):
+            db.set_client_active(row.client_id, not row.active)
+            st.rerun()
+
+
+if st.query_params.get("survey"):
+    survey_page()
+    st.stop()
+
 up = st.sidebar.file_uploader("Load a newer workbook (.xlsx)", type="xlsx",
                               help="Overrides the bundled data for this session only.")
 surveys, monthly = load_upload(up.getvalue()) if up else (db.load_surveys(), db.load_monthly())
@@ -337,3 +447,5 @@ with tab_admin:
                 st.cache_data.clear()
                 st.toast(f"Saved {len(new)} value(s) for {month}.", icon=":material/check:")
                 st.rerun()
+        st.divider()
+        client_survey_admin()

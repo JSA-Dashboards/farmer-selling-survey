@@ -105,3 +105,89 @@ def save_monthly(rows: pd.DataFrame) -> None:
                 (r.commodity, r.kind, r.crop_year, r.month, float(r.pct)))
     finally:
         conn.close()
+
+
+# -- client survey: access codes + monthly responses (Snowflake only) ----------------------------
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I
+
+
+def _hash(code: str) -> str:
+    import hashlib
+    return hashlib.sha256(code.strip().upper().encode()).hexdigest()
+
+
+def _run(sql: str, params=None, fetch: bool = False):
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params or ())
+        return cur.fetchall() if fetch else None
+    finally:
+        conn.close()
+
+
+def client_for_code(code: str):
+    """(client_id, name) for an active client's access code, else None."""
+    rows = _run("SELECT CLIENT_ID, NAME FROM CLIENTS WHERE CODE_HASH = %s AND ACTIVE", [_hash(code)], fetch=True)
+    return rows[0] if rows else None
+
+
+def list_clients() -> pd.DataFrame:
+    return _query("SELECT CLIENT_ID, NAME, ACTIVE, CREATED_AT FROM CLIENTS ORDER BY CREATED_AT")
+
+
+def add_client(name: str) -> str:
+    """Create a client and return its access code; only the hash is stored, so this is the one time it is visible."""
+    import secrets
+    import uuid
+    code = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(8))
+    _run("INSERT INTO CLIENTS (CLIENT_ID, NAME, CODE_HASH, ACTIVE) VALUES (%s, %s, %s, TRUE)",
+         [uuid.uuid4().hex, name.strip(), _hash(code)])
+    return code
+
+
+def set_client_active(client_id: str, active: bool) -> None:
+    _run("UPDATE CLIENTS SET ACTIVE = %s WHERE CLIENT_ID = %s", [active, client_id])
+
+
+def load_client_responses(client_id: str, month_key: str) -> pd.DataFrame:
+    conn = connect()
+    try:
+        df = pd.read_sql("SELECT COMMODITY, KIND, CROP_YEAR, PCT FROM RESPONSES WHERE CLIENT_ID = %s AND MONTH_KEY = %s",
+                         conn, params=[client_id, month_key])
+    finally:
+        conn.close()
+    df.columns = [c.lower() for c in df.columns]
+    return df
+
+
+def save_responses(client_id: str, month_key: str, rows: pd.DataFrame) -> None:
+    """Upsert one client's answers (commodity, kind, crop_year, pct) for a month; resubmitting overwrites."""
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        for r in rows.itertuples(index=False):
+            cur.execute(
+                "MERGE INTO RESPONSES t USING (SELECT %s AS CLIENT_ID, %s AS MONTH_KEY, %s AS COMMODITY, %s AS KIND, "
+                "%s AS CROP_YEAR, %s AS PCT) s ON t.CLIENT_ID = s.CLIENT_ID AND t.MONTH_KEY = s.MONTH_KEY "
+                "AND t.COMMODITY = s.COMMODITY AND t.KIND = s.KIND "
+                "WHEN MATCHED THEN UPDATE SET CROP_YEAR = s.CROP_YEAR, PCT = s.PCT, SUBMITTED_AT = CURRENT_TIMESTAMP() "
+                "WHEN NOT MATCHED THEN INSERT (CLIENT_ID, MONTH_KEY, COMMODITY, KIND, CROP_YEAR, PCT) "
+                "VALUES (s.CLIENT_ID, s.MONTH_KEY, s.COMMODITY, s.KIND, s.CROP_YEAR, s.PCT)",
+                (client_id, month_key, r.commodity, r.kind, r.crop_year, float(r.pct)))
+    finally:
+        conn.close()
+
+
+def load_responses(month_key: str) -> pd.DataFrame:
+    """Every client's answers for a month, with the client name (admin use)."""
+    conn = connect()
+    try:
+        df = pd.read_sql(
+            "SELECT c.NAME, r.COMMODITY, r.KIND, r.CROP_YEAR, r.PCT, r.SUBMITTED_AT FROM RESPONSES r "
+            "JOIN CLIENTS c ON c.CLIENT_ID = r.CLIENT_ID WHERE r.MONTH_KEY = %s ORDER BY c.NAME, r.COMMODITY, r.KIND",
+            conn, params=[month_key])
+    finally:
+        conn.close()
+    df.columns = [c.lower() for c in df.columns]
+    return df
