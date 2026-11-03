@@ -163,58 +163,159 @@ def crop_years(com, now):
     return fmt(y), fmt(y + 1)
 
 
+SURVEY_COMMODITIES = ["Corn", "Soybeans"]
+BUCKETS = [(0, 5)] + [(lo, lo + 4) for lo in range(6, 100, 5)]  # 0-5, 6-10, ..., 96-100
+BUCKET_LABELS = ["%d-%d%%" % b for b in BUCKETS]
+LOCATIONS = ["Illinois", "Indiana", "Iowa", "Kansas", "Michigan", "Minnesota", "Missouri", "Nebraska", "North Dakota",
+             "Ohio", "South Dakota", "Wisconsin", "Other US state", "Canada", "Other"]
+SURVEY_QUESTIONS = {
+    "Corn": ("Based on your anticipated take of corn (included fall take, to arrive, direct positions, etc) "
+             "what % sales has the farmer made for the {cy} crop year?",
+             "What is the next price target for New Crop Corn (Basis Nearby Futures)? (Buys the next 5%)"),
+    "Soybeans": ("Based on your anticipated take of soybeans (included fall take, to arrive, direct positions, etc) "
+                 "what % sales has the farmer made for the {cy} crop year?",
+                 "What is the next futures price point target (Basis Nearby Futures)? (Buys the next 5%)"),
+}
+
+
+def bucket_label(pct):
+    """The 5% range label that contains a percent (e.g. 28 -> '26-30%')."""
+    pct = max(0, min(100, round(pct)))
+    return next(lbl for (lo, hi), lbl in zip(BUCKETS, BUCKET_LABELS) if lo <= pct <= hi)
+
+
+def summarize(resp):
+    """Per commodity: responses, average sold % (range midpoints), most common range, average price target."""
+    out = {}
+    for com in SURVEY_COMMODITIES:
+        r = resp[(resp.commodity == com) & resp.pct_lo.notna()] if len(resp) else resp
+        if not len(r):
+            continue
+        mid = (r.pct_lo + r.pct_hi) / 2
+        counts = r.assign(lbl=r.pct_lo.astype(int).astype(str) + "-" + r.pct_hi.astype(int).astype(str) + "%") \
+            .lbl.value_counts()
+        tg = r.price_target.dropna()
+        out[com] = dict(n=len(r), avg=float(mid.mean()), top=counts.index[0], counts=counts,
+                        target=float(tg.mean()) if len(tg) else None, crop_year=r.crop_year.iloc[0])
+    return out
+
+
+def results_panel(resp, title):
+    """Result cards + a range distribution chart per commodity (also shown to respondents right after submitting)."""
+    s = summarize(resp)
+    if not s:
+        st.info("No responses yet for this month.")
+        return
+    sec(title)
+    cols = st.columns(len(s))
+    for col, (com, d) in zip(cols, s.items()):
+        tgt = "&ndash;" if d["target"] is None else "%.2f" % d["target"]
+        col.markdown(tile("%s %s sold" % (com, d["crop_year"]), bucket_label(d["avg"]),
+                          "average of %d responses &middot; price target %s" % (d["n"], tgt)), unsafe_allow_html=True)
+    for com, d in s.items():
+        counts = d["counts"].reindex(BUCKET_LABELS).fillna(0)
+        counts = counts.loc[counts.cumsum().gt(0) & counts[::-1].cumsum()[::-1].gt(0)]
+        fig = go.Figure(go.Bar(x=counts.index, y=counts.values, marker_color=JSA_GREEN))
+        style_fig(fig, height=260, title="%s: how much has the farmer sold?" % com)
+        fig.update_layout(hovermode="closest", showlegend=False)
+        fig.update_yaxes(title="responses", range=None, ticksuffix="", dtick=1)
+        st.plotly_chart(fig, width="stretch", theme=None)
+
+
+def shared_code():
+    try:
+        return str(st.secrets.get("SURVEY_CODE", "")).strip()
+    except Exception:
+        return ""
+
+
 def survey_page():
-    """Client-facing monthly survey (?survey=1): access code, then % sold per commodity; shows no dashboard data."""
+    """Public anonymous monthly survey (?survey=1): optional shared code, then the poll; results show on submit."""
     st.markdown("<style>[data-testid='stSidebar'], [data-testid='stSidebarCollapsedControl'] {display:none}</style>",
                 unsafe_allow_html=True)
-    sec("Monthly farmer selling survey")
+    sec("JSA monthly farmer selling survey")
     if not db.configured():
         st.error("The survey is not available right now. Please try again later.")
         return
     ss = st.session_state
-    if "svy_client" not in ss:
-        st.write("Enter the access code we sent you.")
-        code = st.text_input("Access code", key="svy_code", max_chars=16)
+    code = shared_code()
+    if code and not ss.get("svy_ok"):
+        entered = st.text_input("Access code", key="svy_code", max_chars=24)
         if st.button("Continue", type="primary"):
-            if ss.get("svy_tries", 0) >= 5:
-                st.error("Too many attempts. Please contact us for a new code.")
-                return
-            hit = db.client_for_code(code)
-            if hit:
-                ss["svy_client"] = (hit[0], hit[1])
+            if entered.strip().lower() == code.lower():
+                ss["svy_ok"] = True
                 st.rerun()
-            ss["svy_tries"] = ss.get("svy_tries", 0) + 1
             st.error("That code was not recognised.")
         return
-    client_id, name = ss["svy_client"]
     now = pd.Timestamp.now(tz="America/Chicago")
     month_key = now.strftime("%Y-%m")
-    st.write(f"Hello, **{name}**. How much of your crop had you sold as of today ({MONTHS[now.month - 1]} {now.year})? "
-             "Enter a percent from 0 to 100, and leave a box empty for crops you do not grow.")
-    prev = {(r.commodity, r.kind): r.pct for r in db.load_client_responses(client_id, month_key).itertuples()}
+    st.caption("All responses are completely anonymous. Instant results are shown once you submit.")
+    for line in recap_lines(now):
+        st.markdown(line)
+    if ss.get("svy_done") == month_key:
+        st.success("Thank you! Your answers are in. Here are the results so far this month:")
+        results_panel(db.load_survey_responses(month_key), "Results so far, %s %d" % (MONTHS[now.month - 1], now.year))
+        return
     entries = []
     with st.form("svy_form"):
-        for com in COMMODITIES:
-            st.markdown(f"**{com}**")
-            cols = st.columns(2)
-            cur, new = crop_years(com, now)
-            for col, knd, lbl, cy in ((cols[0], "current", "Current crop", cur), (cols[1], "new", "New crop", new)):
-                v = col.number_input(f"{lbl} ({cy}), % sold", min_value=0.0, max_value=100.0, value=prev.get((com, knd)),
-                                     step=1.0, placeholder="not reported", key=f"svy_{com}_{knd}")
-                entries.append((com, knd, cy, v))
+        for com in SURVEY_COMMODITIES:
+            cy = crop_years(com, now)[0]
+            q_pct, q_price = SURVEY_QUESTIONS[com]
+            st.markdown("**%s**" % com)
+            pct = st.selectbox(q_pct.format(cy=cy), BUCKET_LABELS, index=None, placeholder="Choose a range",
+                               key="svy_pct_" + com)
+            price = st.number_input(q_price, min_value=0.0, step=0.05, value=None, format="%.2f",
+                                    placeholder="Price, e.g. 5.55", key="svy_price_" + com)
+            entries.append((com, cy, pct, price))
+        loc = st.selectbox("Where are you located?", LOCATIONS, index=None, placeholder="Choose one", key="svy_loc")
         sent = st.form_submit_button("Submit", type="primary")
     if sent:
-        answered = [e for e in entries if e[3] is not None]
+        answered = [e for e in entries if e[2] is not None]
         if not answered:
-            st.warning("Please answer at least one box.")
+            st.warning("Please answer at least one % sold question.")
         else:
-            db.save_responses(client_id, month_key,
-                              pd.DataFrame(answered, columns=["commodity", "kind", "crop_year", "pct"]))
-            st.success("Thank you! Your answers are saved. You can come back this month to change them.")
+            rows = [(com, cy, BUCKETS[BUCKET_LABELS.index(pct)][0], BUCKETS[BUCKET_LABELS.index(pct)][1], price, loc)
+                    for com, cy, pct, price in answered]
+            db.save_survey_response(month_key, rows)
+            ss["svy_done"] = month_key
+            st.rerun()
 
 
-def client_survey_admin():
-    """Admin: responses by month, the average roll-up (publish into the dashboard data), and client access codes."""
+def month_stats(mk):
+    """{commodity: (average sold %, average price target)} for a survey month, from the saved responses."""
+    try:
+        s = summarize(db.load_survey_responses(mk))
+    except Exception:
+        return {}
+    return {com: (d["avg"], d["target"]) for com, d in s.items()}
+
+
+def recap_lines(now):
+    """Last month's results, in the style of the survey email (with the change from the month before)."""
+    prev, prev2 = [(now - pd.DateOffset(months=i)).strftime("%Y-%m") for i in (1, 2)]
+    a, b = month_stats(prev), month_stats(prev2)
+    mon = MONTHS[int(prev[5:]) - 1]
+    mon2 = MONTHS[int(prev2[5:]) - 1]
+    lines = []
+    for com in SURVEY_COMMODITIES:
+        if com not in a:
+            continue
+        pct, tgt = a[com]
+        line = "**%s sales** %s" % (com, bucket_label(pct))
+        if com in b:
+            d_pct = round(pct - b[com][0])
+            line += " (%s from %s)" % ("Flat" if d_pct == 0 else "%+d pts" % d_pct, mon2)
+        if tgt is not None:
+            line += " &nbsp;&middot;&nbsp; futures target %.2f" % tgt
+            if com in b and b[com][1] is not None:
+                d_c = round((tgt - b[com][1]) * 100)
+                line += " (%s from %s)" % ("Flat" if d_c == 0 else "%+dc" % d_c, mon2)
+        lines.append(line)
+    return ["As a reminder, %s results showed:" % mon] + lines if lines else []
+
+
+def survey_admin():
+    """Admin: responses by month, the average roll-up (publish into the dashboard data), and the email recap."""
     sec("Client survey")
     if not db.configured():
         st.info("The client survey needs the Snowflake connection.")
@@ -223,43 +324,29 @@ def client_survey_admin():
     keys = [(now - pd.DateOffset(months=i)).strftime("%Y-%m") for i in range(12)]
     mk = st.selectbox("Survey month", keys, key="svy_admin_month")
     try:
-        resp = db.load_responses(mk)
-        clients = db.list_clients()
+        resp = db.load_survey_responses(mk)
     except Exception:
-        st.warning("Survey tables not found. Run sql/client_survey.sql in Snowflake first.")
+        st.warning("Survey table not found. Run sql/survey_responses.sql in Snowflake first.")
         return
-    n_resp = resp.name.nunique() if len(resp) else 0
-    st.caption(f"{n_resp} of {int(clients.active.sum()) if len(clients) else 0} active clients have responded for {mk}.")
-    if len(resp):
-        roll = resp.groupby(["commodity", "kind", "crop_year"], as_index=False).agg(pct=("pct", "mean"), n=("pct", "size"))
-        roll["pct"] = roll.pct.round(0)
-        st.markdown("**Average of responses** (what gets published)")
-        st.dataframe(roll.rename(columns={"pct": "avg % sold", "n": "responses"}), hide_index=True, width="stretch")
+    st.caption("Survey link: this app's address followed by `?survey=1`. Everyone uses the same access code, "
+               "set as `SURVEY_CODE` in the app's secrets (leave it unset for an open link).")
+    results_panel(resp, "Results, %s" % mk)
+    s = summarize(resp)
+    if s:
         if st.button("Publish averages to monthly data", icon=":material/publish:", key="svy_publish"):
-            out = roll.assign(month=MONTHS[int(mk[5:]) - 1])[["commodity", "kind", "crop_year", "month", "pct"]]
+            mon = MONTHS[int(mk[5:]) - 1]
+            out = pd.DataFrame([(com, "current", d["crop_year"], mon, round(d["avg"])) for com, d in s.items()],
+                               columns=["commodity", "kind", "crop_year", "month", "pct"])
             db.save_monthly(out)
             st.cache_data.clear()
-            st.toast(f"Published {len(out)} value(s) for {MONTHS[int(mk[5:]) - 1]}.", icon=":material/check:")
+            st.toast("Published %d value(s) for %s." % (len(out), mon), icon=":material/check:")
         with st.expander("Individual responses"):
-            st.dataframe(resp, hide_index=True, width="stretch")
-    st.markdown("**Client access codes**")
-    st.caption("Send each client the survey link (this app's address followed by `?survey=1`) and their code.")
-    with st.form("svy_new_client", clear_on_submit=True):
-        new_name = st.text_input("New client name")
-        if st.form_submit_button("Create access code") and new_name.strip():
-            st.session_state["svy_new_code"] = (new_name.strip(), db.add_client(new_name))
-            st.rerun()
-    if "svy_new_code" in st.session_state:
-        nm, cd = st.session_state.pop("svy_new_code")
-        st.success(f"Access code for {nm} (shown once, copy it now):")
-        st.code(cd)
-    if len(clients):
-        st.dataframe(clients.drop(columns=["client_id"]), hide_index=True, width="stretch")
-        who = st.selectbox("Turn a client on or off", clients.name, key="svy_toggle_client")
-        row = clients[clients.name == who].iloc[0]
-        if st.button("Turn off" if row.active else "Turn on", key="svy_toggle"):
-            db.set_client_active(row.client_id, not row.active)
-            st.rerun()
+            st.dataframe(resp.drop(columns=["response_id"]), hide_index=True, width="stretch")
+    nxt = pd.Timestamp(int(mk[:4]), int(mk[5:]), 1, tz="America/Chicago") + pd.DateOffset(months=1)
+    recap = recap_lines(nxt)
+    if recap:
+        st.markdown("**Recap lines for next month's email**")
+        st.code("\n".join(l.replace("**", "").replace("&nbsp;&middot;&nbsp;", " |") for l in recap), language=None)
 
 
 if st.query_params.get("survey"):
@@ -448,4 +535,4 @@ with tab_admin:
                 st.toast(f"Saved {len(new)} value(s) for {month}.", icon=":material/check:")
                 st.rerun()
         st.divider()
-        client_survey_admin()
+        survey_admin()
