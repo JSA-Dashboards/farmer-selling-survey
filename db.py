@@ -127,9 +127,11 @@ def load_survey_responses(month_key: str) -> pd.DataFrame:
     conn = connect()
     try:
         df = pd.read_sql(
-            "SELECT RESPONSE_ID, COMMODITY, CROP_YEAR, PCT_LO, PCT_HI, PRICE_TARGET, LOCATION, SUBMITTED_AT "
-            "FROM SURVEY_RESPONSES WHERE MONTH_KEY = %s ORDER BY SUBMITTED_AT", conn, params=[month_key])
+            "SELECT RESPONSE_ID, COMMODITY, CROP_YEAR, PCT_LO, PCT_HI, PRICE_TARGET, LOCATION, SUBMITTED_ON "
+            "FROM SURVEY_RESPONSES WHERE MONTH_KEY = %s ORDER BY SUBMITTED_ON", conn, params=[month_key])
     finally:
         conn.close()
     df.columns = [c.lower() for c in df.columns]
+    for c in ("pct_lo", "pct_hi", "price_target"):  # NUMBER columns arrive as Decimal
+        df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
